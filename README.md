@@ -7,6 +7,10 @@ Search your surroundings by text or voice on a **Samsung Galaxy XR**, with every
 3. You ask for something ("phone", "monitor", …) with a button, by voice (embedded directly from audio), or by voice transcribed with Whisper.
 4. Cards appear in the room in front of the best-matching regions.
 
+<a href="https://youtube.com/shorts/uARrX3xB77o"><img src="https://img.youtube.com/vi/uARrX3xB77o/maxresdefault.jpg" alt="PanoSearch demo on Galaxy XR (YouTube)" width="480"></a>
+
+▶ [Watch the demo on YouTube](https://youtube.com/shorts/uARrX3xB77o)
+
 ## What you need
 
 | | |
