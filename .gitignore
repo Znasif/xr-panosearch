@@ -1,0 +1,24 @@
+# Gradle / Kotlin build state
+.gradle/
+.kotlin/
+build/
+app/build/
+
+# Machine-specific SDK path
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing material
+*.jks
+*.keystore
+
+# OS
+.DS_Store
+Thumbs.db
