@@ -17,12 +17,11 @@ class EmbGemmaNpu(context: Context) {
     companion object {
         const val TAG = "EmbGemmaNpu"
         const val DIM = 768
-        val MODELS = listOf(
-            "embgemma2_text_S128_qnn_fp16.pte",
-            "embgemma2_text_S512_qnn_fp16.pte",
-            "embgemma2_vision_landscape_qnn_fp16.pte",
-            "embgemma2_audio_5s_qnn_fp16.pte",
-        )
+        /** Weight-shared text .pte with right-sized buckets (q32, a160, img288, s512, grid 9x64). */
+        const val TEXT_MULTI = "embgemma2_text_multi_qnn_fp16.pte"
+        /** Older layout: one text .pte per bucket. Used only when [TEXT_MULTI] is absent. */
+        val TEXT_SINGLE = listOf("embgemma2_text_S128_qnn_fp16.pte", "embgemma2_text_S512_qnn_fp16.pte")
+        val OTHER_MODELS = listOf("embgemma2_vision_landscape_qnn_fp16.pte", "embgemma2_audio_5s_qnn_fp16.pte")
         val CPU_ASSETS = listOf(
             "tokenizer.json",
             "embed_tokens_262144x512_f16.bin",
@@ -46,7 +45,8 @@ class EmbGemmaNpu(context: Context) {
      */
     fun init(perfMode: Int = -1): String {
         if (ready) return "READY"
-        val missing = (MODELS + CPU_ASSETS).filterNot { File(modelDir, it).isFile }
+        val models = (if (File(modelDir, TEXT_MULTI).isFile) listOf(TEXT_MULTI) else TEXT_SINGLE) + OTHER_MODELS
+        val missing = (models + CPU_ASSETS).filterNot { File(modelDir, it).isFile }
         if (missing.isNotEmpty()) return "MISSING in $modelDir: ${missing.joinToString()} (run tools/setup_device.sh)"
         return try {
             // The CDSP loads libQnnHtpV79Skel.so from ADSP_LIBRARY_PATH; it must be set before
@@ -54,7 +54,7 @@ class EmbGemmaNpu(context: Context) {
             Os.setenv("ADSP_LIBRARY_PATH", nativeDir, true)
             System.loadLibrary("embgemma_npu")
             nativeInit(modelDir.absolutePath, perfMode)
-            for (m in MODELS) Log.i(TAG, "preload $m: ${nativePreload(m) / 1000} ms")
+            for (m in models) Log.i(TAG, "preload $m: ${nativePreload(m) / 1000} ms")
             ready = true
             "READY"
         } catch (t: Throwable) {

@@ -9,14 +9,13 @@
 # Usage:  LOCAL_DIR=<folder with the files below> tools/setup_device.sh [--gate]
 #         --gate also pushes LOCAL_DIR/gate/ (host fp32 references for ReplayGateActivity golden mode).
 # Env:    SERIAL=<adb serial> (if more than one device).
-# Files:  embgemma2_text_S128_qnn_fp16.pte  embgemma2_text_S512_qnn_fp16.pte
+# Files:  embgemma2_text_multi_qnn_fp16.pte (or the older embgemma2_text_S128/S512_qnn_fp16.pte)
 #         embgemma2_vision_landscape_qnn_fp16.pte  embgemma2_audio_5s_qnn_fp16.pte
 #         tokenizer.json  embed_tokens_262144x512_f16.bin  gemma4_mel_filters_128x257.f32
 set -euo pipefail
 PKG=com.znasif.xrpanosearch
 DST=/sdcard/Android/data/$PKG/files/embgemma2
-FILES=(embgemma2_text_S128_qnn_fp16.pte embgemma2_text_S512_qnn_fp16.pte
-  embgemma2_vision_landscape_qnn_fp16.pte embgemma2_audio_5s_qnn_fp16.pte
+FILES=(embgemma2_vision_landscape_qnn_fp16.pte embgemma2_audio_5s_qnn_fp16.pte
   tokenizer.json embed_tokens_262144x512_f16.bin gemma4_mel_filters_128x257.f32)
 ADB=(adb); [[ -n "${SERIAL:-}" ]] && ADB=(adb -s "$SERIAL")
 
@@ -27,7 +26,12 @@ lp() { if [[ $winpath == 1 ]]; then wslpath -w "$1"; else echo "$1"; fi; }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-[[ -n "${LOCAL_DIR:-}" ]] || die "set LOCAL_DIR to the folder holding: ${FILES[*]}"
+[[ -n "${LOCAL_DIR:-}" ]] || die "set LOCAL_DIR to the folder holding: ${FILES[*]} + the text model(s)"
+if [[ -f "$LOCAL_DIR/embgemma2_text_multi_qnn_fp16.pte" ]]; then
+  FILES=(embgemma2_text_multi_qnn_fp16.pte "${FILES[@]}")
+else
+  FILES=(embgemma2_text_S128_qnn_fp16.pte embgemma2_text_S512_qnn_fp16.pte "${FILES[@]}")
+fi
 for f in "${FILES[@]}"; do [[ -f "$LOCAL_DIR/$f" ]] || die "$LOCAL_DIR/$f missing"; done
 
 "${ADB[@]}" get-state >/dev/null 2>&1 || die "no adb device (set SERIAL if several)"
@@ -35,6 +39,14 @@ soc=$("${ADB[@]}" shell getprop ro.soc.model | tr -d '\r')
 echo "device: $soc"
 [[ "$soc" == "SXR2330P" ]] || echo "WARNING: models are compiled for SXR2330P (Hexagon V79); $soc may not run them"
 
+# The app must create its external files dir itself: a directory made by adb belongs to shell
+# and stays invisible to the app. Starting any activity creates it (getExternalFilesDir).
+"${ADB[@]}" shell pm path $PKG >/dev/null 2>&1 || die "install the app first (./gradlew installDebug)"
+if ! "${ADB[@]}" shell "[ -d /sdcard/Android/data/$PKG/files ]"; then
+  "${ADB[@]}" shell am start -n $PKG/.ReplayGateActivity >/dev/null
+  sleep 3
+  "${ADB[@]}" shell am force-stop $PKG
+fi
 "${ADB[@]}" shell mkdir -p $DST
 declare -A DEV
 while read -r name size; do DEV[$name]=$size; done < <("${ADB[@]}" shell \

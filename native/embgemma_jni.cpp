@@ -72,9 +72,19 @@ std::vector<uint8_t> read_file(const std::string& path) {
   return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
 }
 
+// One text-tower graph: [B,S,512] embeds + [B,S] mask -> [B,768]. Either one .pte per bucket
+// (method "forward") or one weight-shared multi-method .pte (export_text_multi.py).
+struct TextBucket {
+  std::string file, method;
+  int B, S;
+};
+
+constexpr const char* kTextMulti = "embgemma2_text_multi_qnn_fp16.pte";
+
 struct Engine {
   std::string dir;
   std::map<std::string, std::unique_ptr<Module>> models;
+  std::vector<TextBucket> buckets;  // B == 1 buckets ascending by S, then batched ones
   std::unique_ptr<tokenizers::HFTokenizer> tok;
   int embed_fd = -1;
   size_t embed_bytes = 0;
@@ -88,20 +98,34 @@ struct Engine {
     if (embed_fd >= 0) ::close(embed_fd);
   }
 
-  Module& model(const std::string& file) {
-    auto it = models.find(file);
-    if (it != models.end()) return *it->second;
-    uint64_t t0 = now_us();
-    auto m = std::make_unique<Module>(dir + "/" + file, Module::LoadMode::MmapUseMlockIgnoreErrors);
-    if (m->load_forward() != Error::Ok) throw std::runtime_error("load_forward failed for " + file);
-    LOGI("loaded %s in %.1f ms", file.c_str(), (now_us() - t0) / 1000.0);
-    return *(models[file] = std::move(m));
+  // Loads [file] (once) and its [method] (once); "" loads every method in the file.
+  Module& model(const std::string& file, const std::string& method = "forward") {
+    auto& m = models[file];
+    if (!m) m = std::make_unique<Module>(dir + "/" + file, Module::LoadMode::MmapUseMlockIgnoreErrors);
+    std::vector<std::string> names;
+    if (method.empty()) {
+      auto all = m->method_names();
+      if (!all.ok()) throw std::runtime_error("method_names failed for " + file);
+      names.assign(all->begin(), all->end());
+    } else {
+      names.push_back(method);
+    }
+    for (const auto& name : names) {
+      if (m->is_method_loaded(name)) continue;
+      uint64_t t0 = now_us();
+      if (m->load_method(name) != Error::Ok) {
+        throw std::runtime_error("load_method(" + name + ") failed for " + file);
+      }
+      LOGI("loaded %s:%s in %.1f ms", file.c_str(), name.c_str(), (now_us() - t0) / 1000.0);
+    }
+    return *m;
   }
 
-  const executorch::aten::Tensor& forward1(Module& m, const std::vector<EValue>& in, const char* what,
-                                           uint64_t& us) {
+  const executorch::aten::Tensor& run(const std::string& file, const std::string& method,
+                                      const std::vector<EValue>& in, const char* what, uint64_t& us) {
+    Module& m = model(file, method);
     uint64_t t0 = now_us();
-    auto r = m.forward(in);
+    auto r = m.execute(method, in);
     us += now_us() - t0;
     if (!r.ok()) {
       throw std::runtime_error(std::string(what) + " forward failed: error " +
@@ -118,34 +142,52 @@ struct Engine {
     for (int j = 0; j < kEgHidden; ++j) dst[j] = static_cast<float>(src[j]) * kEgEmbedScale;
   }
 
-  Module& text_model(int S) {
-    return model(S == 128 ? "embgemma2_text_S128_qnn_fp16.pte" : "embgemma2_text_S512_qnn_fp16.pte");
+  // Smallest batch-1 bucket that holds n tokens.
+  const TextBucket& bucket_for(int n) const {
+    for (const auto& b : buckets) {
+      if (b.B == 1 && b.S >= n) return b;
+    }
+    throw std::runtime_error("embgemma: sequence of " + std::to_string(n) + " tokens exceeds 512");
   }
 
-  // Runs the text tower on [1,S,512] embeds whose first n rows are valid -> out[768].
-  void run_text(std::vector<float>& embeds, int S, int n, float* out, uint64_t& text_us) {
-    std::vector<float> mask(static_cast<size_t>(S), 0.f);
-    std::fill(mask.begin(), mask.begin() + n, 1.f);
-    auto et = make_tensor_ptr({1, S, kEgHidden}, embeds.data(), ScalarType::Float);
-    auto mt = make_tensor_ptr({1, S}, mask.data(), ScalarType::Float);
-    const auto& o = forward1(text_model(S), {EValue(*et), EValue(*mt)}, "embgemma text", text_us);
-    if (o.numel() != kEgOutDim) throw std::runtime_error("embgemma text: unexpected output size");
-    memcpy(out, o.const_data_ptr<float>(), kEgOutDim * sizeof(float));
+  const TextBucket* batch_bucket(int B, int n) const {
+    for (const auto& b : buckets) {
+      if (b.B == B && b.S >= n) return &b;
+    }
+    return nullptr;
   }
 
-  // [BOS, BOx, soft x n, EOx, EOS] -> text_S128 / text_S512 -> out[768].
+  // Runs [bk] on embeds [B,S,512] whose first n[i] rows per item are valid -> out[B*768].
+  void run_text(const TextBucket& bk, std::vector<float>& embeds, const int* n, float* out,
+                uint64_t& text_us) {
+    std::vector<float> mask(static_cast<size_t>(bk.B) * bk.S, 0.f);
+    for (int i = 0; i < bk.B; ++i) std::fill_n(mask.begin() + static_cast<size_t>(i) * bk.S, n[i], 1.f);
+    auto et = make_tensor_ptr({bk.B, bk.S, kEgHidden}, embeds.data(), ScalarType::Float);
+    auto mt = make_tensor_ptr({bk.B, bk.S}, mask.data(), ScalarType::Float);
+    const auto& o = run(bk.file, bk.method, {EValue(*et), EValue(*mt)}, "embgemma text", text_us);
+    if (o.numel() != static_cast<ssize_t>(bk.B) * kEgOutDim) {
+      throw std::runtime_error("embgemma text: unexpected output size");
+    }
+    memcpy(out, o.const_data_ptr<float>(), static_cast<size_t>(bk.B) * kEgOutDim * sizeof(float));
+  }
+
+  // Writes [BOS, BOx, soft x n, EOx, EOS] at dst (n + 4 rows).
+  void put_soft_tokens(const float* soft, int n, uint32_t bo, uint32_t eo, float* dst) const {
+    lookup_row(kEgBos, dst);
+    lookup_row(bo, dst + kEgHidden);
+    memcpy(dst + 2 * kEgHidden, soft, static_cast<size_t>(n) * kEgHidden * sizeof(float));
+    lookup_row(eo, dst + static_cast<size_t>(2 + n) * kEgHidden);
+    lookup_row(kEgEos, dst + static_cast<size_t>(3 + n) * kEgHidden);
+  }
+
+  // [BOS, BOx, soft x n, EOx, EOS] -> smallest text bucket -> out[768].
   void embed_soft_tokens(const float* soft, int n, uint32_t bo, uint32_t eo, float* out,
                          uint64_t& text_us) {
     int total = n + 4;
-    int S = (total <= 128) ? 128 : 512;
-    if (total > S) throw std::runtime_error("embgemma: soft token sequence exceeds 512");
-    std::vector<float> embeds(static_cast<size_t>(S) * kEgHidden, 0.f);
-    lookup_row(kEgBos, embeds.data());
-    lookup_row(bo, embeds.data() + kEgHidden);
-    memcpy(embeds.data() + 2 * kEgHidden, soft, static_cast<size_t>(n) * kEgHidden * sizeof(float));
-    lookup_row(eo, embeds.data() + static_cast<size_t>(2 + n) * kEgHidden);
-    lookup_row(kEgEos, embeds.data() + static_cast<size_t>(3 + n) * kEgHidden);
-    run_text(embeds, S, total, out, text_us);
+    const TextBucket& bk = bucket_for(total);
+    std::vector<float> embeds(static_cast<size_t>(bk.S) * kEgHidden, 0.f);
+    put_soft_tokens(soft, n, bo, eo, embeds.data());
+    run_text(bk, embeds, &total, out, text_us);
   }
 };
 
@@ -184,6 +226,16 @@ void open_engine(const std::string& dir) {
   }
   e->mel_filters.resize(fb.size() / sizeof(float));
   memcpy(e->mel_filters.data(), fb.data(), fb.size());
+
+  if (access((dir + "/" + kTextMulti).c_str(), R_OK) == 0) {
+    e->buckets = {{kTextMulti, "q32", 1, 32},     {kTextMulti, "a160", 1, 160},
+                  {kTextMulti, "img288", 1, 288}, {kTextMulti, "s512", 1, 512},
+                  {kTextMulti, "grid", 9, 64}};
+  } else {
+    e->buckets = {{"embgemma2_text_S128_qnn_fp16.pte", "forward", 1, 128},
+                  {"embgemma2_text_S512_qnn_fp16.pte", "forward", 1, 512}};
+  }
+  LOGI("text buckets: %s", e->buckets[0].file.c_str());
   g_eng = std::move(e);
 }
 
@@ -238,7 +290,7 @@ JNIEXPORT void JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativeInit(
   });
 }
 
-// Loads one .pte (file name relative to the init dir); returns the load time in microseconds.
+// Loads one .pte and all its methods (file name relative to the init dir); returns microseconds.
 JNIEXPORT jlong JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativePreload(
     JNIEnv* env, jclass, jstring jfile) {
   return guarded(env, [&]() -> jlong {
@@ -246,7 +298,7 @@ JNIEXPORT jlong JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativePrelo
     std::string file(f);
     env->ReleaseStringUTFChars(jfile, f);
     uint64_t t0 = now_us();
-    eng().model(file);
+    eng().model(file, "");
     return static_cast<jlong>(now_us() - t0);
   });
 }
@@ -270,14 +322,14 @@ JNIEXPORT jfloatArray JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativ
       ids.back() = kEgEos;
     }
     int n = static_cast<int>(ids.size());
-    int S = (n <= 128) ? 128 : 512;
-    std::vector<float> embeds(static_cast<size_t>(S) * kEgHidden, 0.f);
+    const TextBucket& bk = e.bucket_for(n);
+    std::vector<float> embeds(static_cast<size_t>(bk.S) * kEgHidden, 0.f);
     for (int i = 0; i < n; ++i) {
       e.lookup_row(static_cast<uint32_t>(ids[i]), embeds.data() + static_cast<size_t>(i) * kEgHidden);
     }
     uint64_t text_us = 0;
     float out[kEgOutDim];
-    e.run_text(embeds, S, n, out, text_us);
+    e.run_text(bk, embeds, &n, out, text_us);
 
     put_times(env, times, {static_cast<jlong>(text_us), n});
     jfloatArray res = env->NewFloatArray(kEgOutDim);
@@ -296,15 +348,14 @@ JNIEXPORT jfloatArray JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativ
     if (static_cast<size_t>(env->GetArrayLength(jpixels)) != numel) {
       throw std::runtime_error("embgemma vision: pixels must be f32 [1,3,672,960]");
     }
-    Module& vis = e.model("embgemma2_vision_landscape_qnn_fp16.pte");
-
     uint64_t vis_us = 0, text_us = 0;
     std::vector<float> soft(static_cast<size_t>(kVisTokens) * kEgHidden);
     {
       std::vector<float> px(numel);
       env->GetFloatArrayRegion(jpixels, 0, static_cast<jsize>(numel), px.data());
       auto pt = make_tensor_ptr({1, 3, kVisH, kVisW}, px.data(), ScalarType::Float);
-      const auto& feats = e.forward1(vis, {EValue(*pt)}, "embgemma vision", vis_us);
+      const auto& feats = e.run("embgemma2_vision_landscape_qnn_fp16.pte", "forward", {EValue(*pt)},
+                                "embgemma vision", vis_us);
       if (feats.numel() != static_cast<ssize_t>(soft.size())) {
         throw std::runtime_error("embgemma vision: unexpected output size");
       }
@@ -321,17 +372,37 @@ JNIEXPORT jfloatArray JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativ
       constexpr int GH = 14, GW = 20, sh = 6, sw = 8;
       const int r_starts[3] = {0, (GH - sh) / 2, GH - sh};
       const int c_starts[3] = {0, (GW - sw) / 2, GW - sw};
-      std::vector<float> patch(static_cast<size_t>(sh * sw) * kEgHidden);
-      int idx = 1;
-      for (int r0 : r_starts) {
-        for (int c0 : c_starts) {
-          for (int dr = 0; dr < sh; ++dr) {
-            memcpy(patch.data() + static_cast<size_t>(dr * sw) * kEgHidden,
-                   soft.data() + static_cast<size_t>((r0 + dr) * GW + c0) * kEgHidden,
-                   static_cast<size_t>(sw) * kEgHidden * sizeof(float));
+      constexpr int n = sh * sw;
+      auto copy_window = [&](int r0, int c0, float* dst) {
+        for (int dr = 0; dr < sh; ++dr) {
+          memcpy(dst + static_cast<size_t>(dr * sw) * kEgHidden,
+                 soft.data() + static_cast<size_t>((r0 + dr) * GW + c0) * kEgHidden,
+                 static_cast<size_t>(sw) * kEgHidden * sizeof(float));
+        }
+      };
+      if (const TextBucket* bk = e.batch_bucket(9, n + 4)) {
+        // All 9 windows in one batched call: [9, S, 512].
+        const size_t item = static_cast<size_t>(bk->S) * kEgHidden;
+        std::vector<float> embeds(9 * item, 0.f), patch(static_cast<size_t>(n) * kEgHidden);
+        int lens[9];
+        int idx = 0;
+        for (int r0 : r_starts) {
+          for (int c0 : c_starts) {
+            copy_window(r0, c0, patch.data());
+            e.put_soft_tokens(patch.data(), n, kEgBoi, kEgEoi, embeds.data() + idx * item);
+            lens[idx++] = n + 4;
           }
-          e.embed_soft_tokens(patch.data(), sh * sw, kEgBoi, kEgEoi,
-                              embs.data() + static_cast<size_t>(idx++) * kEgOutDim, text_us);
+        }
+        e.run_text(*bk, embeds, lens, embs.data() + kEgOutDim, text_us);
+      } else {
+        std::vector<float> patch(static_cast<size_t>(n) * kEgHidden);
+        int idx = 1;
+        for (int r0 : r_starts) {
+          for (int c0 : c_starts) {
+            copy_window(r0, c0, patch.data());
+            e.embed_soft_tokens(patch.data(), n, kEgBoi, kEgEoi,
+                                embs.data() + static_cast<size_t>(idx++) * kEgOutDim, text_us);
+          }
         }
       }
     }
@@ -350,7 +421,6 @@ JNIEXPORT jfloatArray JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativ
     JNIEnv* env, jclass, jshortArray jpcm, jlongArray times) {
   return guarded(env, [&]() -> jfloatArray {
     Engine& e = eng();
-    Module& aud = e.model("embgemma2_audio_5s_qnn_fp16.pte");
     std::vector<int16_t> pcm(static_cast<size_t>(env->GetArrayLength(jpcm)));
     env->GetShortArrayRegion(jpcm, 0, static_cast<jsize>(pcm.size()), pcm.data());
 
@@ -364,7 +434,8 @@ JNIEXPORT jfloatArray JNICALL Java_com_znasif_xrpanosearch_npu_EmbGemmaNpu_nativ
     {
       auto mt = make_tensor_ptr({1, kAudT, embgemma_mel::kMels}, mel.mel.data(), ScalarType::Float);
       auto mkt = make_tensor_ptr({1, kAudT}, mel.mask.data(), ScalarType::Float);
-      const auto& feats = e.forward1(aud, {EValue(*mt), EValue(*mkt)}, "embgemma audio", aud_us);
+      const auto& feats = e.run("embgemma2_audio_5s_qnn_fp16.pte", "forward", {EValue(*mt), EValue(*mkt)},
+                                "embgemma audio", aud_us);
       if (feats.numel() != static_cast<ssize_t>(soft.size())) {
         throw std::runtime_error("embgemma audio: unexpected output size");
       }
