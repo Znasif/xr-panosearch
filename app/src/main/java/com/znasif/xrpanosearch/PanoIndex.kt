@@ -37,8 +37,10 @@ data class HeadFrame(val pos: V3, val right: V3, val up: V3, val forward: V3) {
 
     /**
      * World ray direction through normalized image point (u, v) (0..1, v down) of the world
-     * camera. Nominal pinhole: the Aura RGB camera (auracamerahal/0) has a 2.4 mm lens on a
-     * 3.2 x 2.4 mm sensor, i.e. f = 0.75 x image width for the 4:3 1440x1080 stream (HFOV ~67 deg).
+     * camera. Pinhole with f = 0.87 x image width for the 1440x1080 stream (HFOV ~59 deg), measured
+     * on-head (panel-vs-room scale in a recording). The HAL metadata is inconsistent (16:9
+     * 1920x1080 array, 4:3 3.2 x 2.4 mm physical size; 1440x1080 is a side crop), so it gives
+     * anything from 0.75 to 1.0.
      * The camera is assumed to look along the head's forward axis; there is no calibrated
      * extrinsic on Android XR.
      */
@@ -49,8 +51,8 @@ data class HeadFrame(val pos: V3, val right: V3, val up: V3, val forward: V3) {
     }
 }
 
-/** Nominal world-camera focal length as a fraction of image width (see [HeadFrame.rayThrough]). */
-const val FX_OVER_W = 0.75f
+/** World-camera focal length as a fraction of image width (see [HeadFrame.rayThrough]). */
+const val FX_OVER_W = 0.87f
 
 /** A sub-rectangle of a captured frame, normalized 0..1 (v down). */
 data class Region(val label: String, val u0: Float, val v0: Float, val u1: Float, val v1: Float) {
