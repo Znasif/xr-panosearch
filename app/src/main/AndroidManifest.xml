@@ -7,6 +7,8 @@
     <uses-feature android:name="android.software.xr.api.spatial" android:required="false" />
 
     <application android:label="PanoSearch" android:theme="@android:style/Theme.Material.NoActionBar">
+        <!-- Lets the app process dlopen the vendor FastRPC lib so QNN can reach the CDSP. -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
         <property
             android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
             android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_MANAGED" />

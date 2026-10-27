@@ -9,8 +9,8 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Bitmap -> EmbeddingGemma 2 vision input: stretch to 960x672 (landscape) or 672x960 (portrait),
- * planar CHW f32 in [0,1]. Uses PIL-style antialiased bicubic (a = -0.5), horizontal pass then
+ * Bitmap -> EmbeddingGemma 2 vision input: stretch to 960x672 (landscape; the only orientation the
+ * Aura camera produces and the only vision model shipped), planar CHW f32 in [0,1]. Uses PIL-style antialiased bicubic (a = -0.5), horizontal pass then
  * vertical, each rounded to 8 bits like PIL. The vision port measured that bilinear or area
  * resizing costs up to 0.035 embedding cosine on thin text (embgemma2/vision/REPORT.md).
  */
@@ -28,11 +28,10 @@ object ImagePrep {
             .forEach { it.get() }
     }
 
-    /** Returns (pixels, orient) where orient 0 = landscape, 1 = portrait (NpuClient convention). */
-    fun toChw(src: Bitmap): Pair<FloatArray, Int> {
-        val landscape = src.width >= src.height
-        val ow = if (landscape) LONG else SHORT
-        val oh = if (landscape) SHORT else LONG
+    /** Returns CHW f32 [3, 672, 960]. */
+    fun toChw(src: Bitmap): FloatArray {
+        val ow = LONG
+        val oh = SHORT
         val w = src.width
         val h = src.height
         val argb = IntArray(w * h)
@@ -77,7 +76,7 @@ object ImagePrep {
                 out[c * plane + y * ow + x] = clamp8(s) / 255f
             }
         } }
-        return out to (if (landscape) 0 else 1)
+        return out
     }
 
     private class Coeffs(val ksize: Int, val bounds: IntArray, val kk: FloatArray)

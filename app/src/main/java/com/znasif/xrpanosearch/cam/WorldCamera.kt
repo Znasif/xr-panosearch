@@ -38,8 +38,9 @@ import android.os.SystemClock
 import android.util.Log
 
 /**
- * Camera2 capture of one Galaxy XR world camera (id "0" by default: YUV_420_888 1920x1440 at
- * ~25 fps; id "2" also delivers world frames, id "1" is the avatar camera).
+ * Camera2 capture of the Project Aura RGB world camera (id "0" = auracamerahal/0, YUV_420_888
+ * 1440x1080 at up to 30 fps; 4:3 like the 960x672 vision input, so frames are only scaled, not
+ * cropped). The HAL reports every camera as facing back; ids 2/3 are mono tracking fisheyes.
  *
  * Keeps only the newest frame (the previous one is closed as soon as a new one arrives), so
  * nothing queues up and frames are never copied unless [snapshot] is called. Explicit
@@ -324,8 +325,8 @@ class WorldCamera private constructor(private val appContext: Context) {
     companion object {
         private const val TAG = "WorldCam"
         const val DEFAULT_CAMERA_ID = "0"
-        const val DEFAULT_WIDTH = 1920
-        const val DEFAULT_HEIGHT = 1440
+        const val DEFAULT_WIDTH = 1440
+        const val DEFAULT_HEIGHT = 1080
         private const val MAX_IMAGES = 3
         private const val RETRY_MS = 2000L
         private const val STALL_MS = 1500L

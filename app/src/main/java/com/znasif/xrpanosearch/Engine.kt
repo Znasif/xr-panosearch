@@ -4,15 +4,15 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
-import com.google.xr.embardiment.npu.NpuClient
+import com.znasif.xrpanosearch.npu.EmbGemmaNpu
 import org.json.JSONArray
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
 /**
- * NPU work for PanoSearch: ring-slot indexing (vision + 3x3 grid) and query embedding (text,
- * audio, or Whisper transcript -> text). Every call runs on one background thread because
- * NpuClient calls block and must stay off the main thread.
+ * NPU work for PanoSearch: ring-slot indexing (vision + 3x3 grid) and query embedding (text or
+ * audio). Every call runs on one background thread because EmbGemmaNpu calls block, are not
+ * thread-safe, and must stay off the main thread.
  */
 class Engine(context: Context) {
     companion object {
@@ -36,7 +36,7 @@ class Engine(context: Context) {
     }
 
     private val app = context.applicationContext
-    val npu = NpuClient(app)
+    val npu = EmbGemmaNpu(app)
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "pano-npu").apply { isDaemon = true } }
 
     fun post(block: () -> Unit) = worker.execute {
@@ -44,24 +44,23 @@ class Engine(context: Context) {
     }
 
     /** Blocking; call on the worker. */
-    fun connect(): String = npu.connect(30_000L)
+    fun connect(): String = npu.init()
 
     /** Blocking; call on the worker. Embeds [frame] (any size, 4:3 expected) for ring [slot]. */
     fun index(slot: Int, frame: Bitmap, head: HeadFrame, source: String): PanelCapture {
         val t0 = System.nanoTime()
-        val (px, orient) = ImagePrep.toChw(frame)
+        val px = ImagePrep.toChw(frame)
         val prepMs = (System.nanoTime() - t0) / 1_000_000
-        val r = npu.embgemmaImageGrid(px, orient, true)
-        val grid = Region.grid3x3(orient == 0)
+        val r = npu.imageGrid(px, true)
         val regions = ArrayList<Pair<Region, FloatArray>>(10)
-        regions += Region.FULL to r.fullEmbedding
-        grid.forEachIndexed { i, g -> regions += g to r.gridEmbeddings[i] }
+        regions += Region.FULL to r.full
+        Region.grid3x3().forEachIndexed { i, g -> regions += g to r.grid[i] }
         val thumbH = THUMB_W * frame.height / frame.width
         val thumb = Bitmap.createScaledBitmap(frame, THUMB_W, thumbH, true)
         Log.i(TAG, "INDEX slot=$slot src=$source yaw=%.1f prep=${prepMs}ms vision=${r.visionUs / 1000}ms text=${r.textUs / 1000}ms wall=${r.wallUs / 1000}ms"
             .format(head.yawDeg))
         return PanelCapture(
-            slot, thumb, head, frame.height.toFloat() / frame.width, r.fullEmbedding, regions,
+            slot, thumb, head, frame.height.toFloat() / frame.width, r.full, regions,
             r.visionUs / 1000, r.textUs / 1000, source,
         )
     }
@@ -69,28 +68,19 @@ class Engine(context: Context) {
     class Query(val label: String, val emb: FloatArray, val ms: Long, val detail: String)
 
     fun embedText(text: String): Query {
-        val r = npu.embgemmaText(QUERY_PREFIX + text)
+        val r = npu.text(QUERY_PREFIX + text)
         Log.i(TAG, "QUERY text=\"$text\" tokens=${r.nTokens} npu=${r.textUs / 1000}ms wall=${r.wallUs / 1000}ms")
         return Query(text, r.embedding, r.wallUs / 1000, "text ${r.textUs / 1000} ms")
     }
 
     /** Spoken query embedded directly from audio (no transcript). */
     fun embedAudio(pcm: ShortArray): Query {
-        val bucket = if (pcm.size <= 5 * 16000) 500 else 1120
-        val r = npu.embgemmaAudio(pcm, bucket)
+        val r = npu.audio(pcm)
         Log.i(TAG, "QUERY audio samples=${pcm.size} soft=${r.nSoftTokens} mel=${r.melUs / 1000}ms audio=${r.audioUs / 1000}ms text=${r.textUs / 1000}ms wall=${r.wallUs / 1000}ms")
         return Query("(voice)", r.embedding, r.wallUs / 1000,
             "audio ${r.audioUs / 1000} ms + text ${r.textUs / 1000} ms")
     }
 
-    /** Spoken query transcribed by Whisper, then embedded as text. */
-    fun embedTranscript(pcm: ShortArray): Query {
-        val w = npu.whisperTranscribe(pcm)
-        val text = w.text.trim().trimEnd('.', '?', '!')
-        Log.i(TAG, "WHISPER \"$text\" wall=${w.wallUs / 1000}ms")
-        val q = embedText(text)
-        return Query(text, q.emb, w.wallUs / 1000 + q.ms, "whisper ${w.wallUs / 1000} ms + ${q.detail}")
-    }
 
     class ReplayFrame(val file: String, val yawDeg: Float, val pitchDeg: Float)
 

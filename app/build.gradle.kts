@@ -27,15 +27,29 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            // Extract .so files to nativeLibraryDir as real files: the CDSP loads
+            // libQnnHtpV79Skel.so via ADSP_LIBRARY_PATH and cannot read it from inside the APK.
+            useLegacyPackaging = true
+            // qnn-runtime ships every backend and HTP arch; Aura (SXR2330P) needs only HTP V79.
+            // libQnnHtpPrepare.so (90 MB) is for on-device graph compilation, which the AOT
+            // context binaries inside the .pte files don't need.
+            excludes += listOf(
+                "**/libQnnDsp*.so", "**/libQnnGpu.so", "**/libQnnHtpPrepare.so",
+                "**/libQnnHtpV6*.so", "**/libQnnHtpV7[0-5]*.so", "**/libQnnHtpV81*.so",
+            )
+        }
+    }
     lint {
         disable += "RestrictedApi"
     }
 }
 
 dependencies {
-    implementation(files("libs/npuclient-release.aar"))
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // QNN runtime for the in-process HTP backend (libQnnHtp.so, V79 stub + skel, libQnnSystem.so).
+    // Must match the QAIRT version the .pte files and libqnn_executorch_backend.so were built with.
+    implementation("com.qualcomm.qti:qnn-runtime:2.46.0")
 
     val composeBom = platform("androidx.compose:compose-bom:2025.02.00")
     implementation(composeBom)

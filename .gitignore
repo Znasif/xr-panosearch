@@ -22,3 +22,5 @@ captures/
 # OS
 .DS_Store
 Thumbs.db
+native/out/
+app/src/main/jniLibs/

@@ -55,8 +55,8 @@ import kotlin.math.asin
  * PanoSearch (Full Space). A 12-panel panorama ring (Project_Aura geometry, see [Ring]) surrounds
  * you at eye level. In live capture the panel you face becomes a window onto the world camera;
  * hold still for [DWELL_MS] (ticks speed up) and it freezes into that slice of the panorama (chime)
- * while the full frame is embedded on the V69 NPU (full frame + 3x3 sub-regions). Then search by
- * chip, by voice (audio embedding) or by voice via Whisper; matches get cards along their rays.
+ * while the full frame is embedded on the HTP (full frame + 3x3 sub-regions). Then search by chip
+ * or by voice (audio embedding); matches get cards along their rays.
  * Logcat tag PanoSearch.
  */
 class MainActivity : ComponentActivity() {
@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
     private var converting = false
     private var recording by mutableStateOf(false)
     private var status by mutableStateOf("starting")
-    private var npuStatus by mutableStateOf("NPU: connecting")
+    private var npuStatus by mutableStateOf("NPU: loading models")
     private var queryInfo by mutableStateOf("Capture the room, or replay the recorded sweep.")
 
     private var head: HeadFrame? = null
@@ -312,7 +312,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun voiceQuery(useWhisper: Boolean) {
+    private fun voiceQuery() {
         if (recording) return
         recording = true
         queryInfo = "Listening (up to 5 s) ..."
@@ -321,9 +321,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 recording = false
                 if (pcm.size < 16000 / 4) { queryInfo = "Didn't hear anything."; return@runOnUiThread }
-                runQuery(if (useWhisper) "voice via Whisper" else "voice") {
-                    if (useWhisper) engine.embedTranscript(pcm) else engine.embedAudio(pcm)
-                }
+                runQuery("voice") { engine.embedAudio(pcm) }
             }
         }
     }
@@ -358,10 +356,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { voiceQuery(false) }, enabled = !recording) {
-                    Text(if (recording) "Listening..." else "Speak (audio)")
+                Button(onClick = { voiceQuery() }, enabled = !recording) {
+                    Text(if (recording) "Listening..." else "Speak")
                 }
-                Button(onClick = { voiceQuery(true) }, enabled = !recording) { Text("Speak (Whisper)") }
             }
             Text(queryInfo, fontSize = 14.sp, color = Color(0xFFFFE082))
         }

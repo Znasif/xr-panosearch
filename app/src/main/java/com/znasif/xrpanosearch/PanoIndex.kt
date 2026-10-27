@@ -67,15 +67,15 @@ data class Region(val label: String, val u0: Float, val v0: Float, val u1: Float
         val FULL = Region("full", 0f, 0f, 1f, 1f)
 
         /**
-         * The 3x3 overlapping windows npu_server op 9 embeds, row-major (top-left .. bottom-right).
+         * The 3x3 overlapping windows EmbGemmaNpu.imageGrid embeds, row-major (top-left .. bottom-right).
          * Landscape token grid 14x20 with 6x8 windows at rows {0,4,8}, cols {0,6,12}; portrait is
          * the transpose (20x14, 8x6 windows at rows {0,6,12}, cols {0,4,8}).
          */
-        fun grid3x3(landscape: Boolean): List<Region> {
-            val gh = if (landscape) 14 else 20
-            val gw = if (landscape) 20 else 14
-            val sh = if (landscape) 6 else 8
-            val sw = if (landscape) 8 else 6
+        fun grid3x3(): List<Region> {
+            val gh = 14
+            val gw = 20
+            val sh = 6
+            val sw = 8
             val rs = intArrayOf(0, (gh - sh) / 2, gh - sh)
             val cs = intArrayOf(0, (gw - sw) / 2, gw - sw)
             val rowName = arrayOf("top", "middle", "bottom")
